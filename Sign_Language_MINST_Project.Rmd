@@ -1,0 +1,286 @@
+---
+title: "Sign_Language_MNIST"
+author: "Matthew Lowry"
+date: "7/9/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Download and Parse Data
+
+Data Set: https://www.kaggle.com/datamunge/sign-language-mnist 
+
+CSV files are provided through the Kaggle link above. The training and test data were read into their respective dataframes.
+
+```{r}
+
+train_df <- read.csv(".../sign_mnist_train/sign_mnist_train.csv")
+test_df <- read.csv(".../sign_mnist_test/sign_mnist_test.csv")
+
+
+```
+
+
+# Visualize Distribution of Data
+
+Overall, the count data seems to be evenly distributed in the training dataset.
+
+
+```{r}
+
+library(ggplot2)
+
+train_counts <- ggplot(data=train_df) + geom_bar(aes(x=factor(label), fill=factor(label)), stat="count") + guides(fill=FALSE)
+train_counts + labs(title="Training Images per Label", x="Label", y="Count") + theme(plot.title = element_text(hjust = 0.5)) # last part centers title
+
+```
+
+
+# Pre-Process the Data
+
+Each training and test case represents a label (0-25) as a one-to-one map for each alphabetic letter A-Z (and no cases for 9=J or 25=Z because of gesture motions). The training data (27,455 cases) and test data (7,172 cases) are approximately half the size of the standard MNIST but otherwise similar with a header row of label, pixel1,pixel2….pixel784 which represent a single 28x28 pixel image with grayscale values between 0-255. 
+
+Because J and Z are missing from this dataset the values of the labels consist of 0:24, excluding 9, which is a total of 24 labels (classes). When the labels are one-hot-encoded by `to_categorical()` the numbering moves from 0-based to 1-based making the labels start at 1 and end at 25. Additionally, the missing label in the dataset (was 9, is now 10) is added to the matrix even though the label does not actually exist in the training dataframe "label" column. This is demonstrated below.
+
+
+```{r}
+
+library(keras)
+
+y_train <- to_categorical(train_df[["label"]])
+y_test <- to_categorical(test_df[["label"]])
+
+length(unique(train_df[["label"]]))
+dim(y_train)
+
+```
+
+
+Clearly an extra 25th class is created when converting the labels to a one-hot-encoded matrix. To troubleshoot, first I checked for empty columns which might indicate a class was created automatically by `to_categorical()`.
+
+
+```{r}
+
+get_empty_columns <- function(one_hot_matrix) {
+  
+  # This function takes a one-hot-encoded matrix (specifically from to_categorical()) and checks if any extraneous/empty columns exist
+  
+  empties <- c()
+  for (i in 1:ncol(one_hot_matrix)) {
+  
+    values <- unique(one_hot_matrix[,i])
+  
+    if (!1 %in% values) {
+      # no images have this class
+      empties <- c(empties, i)
+    
+    }
+  }
+  cat("Empty columns found:", length(empties))
+  return(empties)
+}
+
+
+empty_columns_train <- get_empty_columns(y_train)
+print(empty_columns_train)
+
+# confirm it occurred in both datasets
+empty_columns_test <- get_empty_columns(y_test)
+print(empty_columns_test)
+
+
+```
+
+
+The extra column must be removed or the neural network will produce the following error:
+`InvalidArgumentError: logits and labels must be broadcastable: logits_size=[<batch_size>,24] labels_size=[<batch_size>,25]`
+
+Softmax will need logits and labels sizes to be equal. This can be done by either increasing the output layer units to 25 or deleting our extraneous column. I chose the latter because, as stated previously, the extra column represents a label (class) that does not exist in the dataset.
+
+Once this issue was resolved, I reshaped the data from a 2D dataframe to a 4D array (3D data) with one color channel since the data is already in grayscale.
+
+
+```{r}
+
+# remove empty label column; only one, so quick and easy
+y_train <- y_train[,-10]
+dim(y_train)
+
+y_test <- y_test[,-10]
+dim(y_test)
+
+
+# remove label column, create new df to keep original data
+train_df2 <- subset(train_df, select = -label)
+test_df2 <- subset(test_df, select = -label)
+
+# make 4d array from 2d df
+train_dims <- dim(train_df2)
+num_train_samples <- train_dims[1]
+image_dim_3D <- sqrt(train_dims[2]) # provides new size of image data in 3D space (784 -> 28x28)
+color_channels <- 1 # data is in grayscale
+
+x_train <- array(unlist(train_df2), dim = c(num_train_samples, image_dim_3D, image_dim_3D, color_channels))
+
+num_test_samples <- dim(test_df2)[1]
+x_test <- array(unlist(test_df2), dim = c(num_test_samples, image_dim_3D, image_dim_3D, color_channels))
+
+
+```
+
+
+# Data Augmentation
+
+While both data generators normalize the image data, the training image data generator adds augmentation and creates a 20% validation split. This should benefit the network by preventing overfitting to the training data. If more augmentation is required to prevent overfitting then it will add more later.
+
+
+```{r}
+
+# create an image data generator with image rescaling and some augmentation
+training_datagen <- image_data_generator(rescale = 1/255,
+        rotation_range=10,
+        zoom_range = 0.1,
+        width_shift_range=0.1,
+        height_shift_range=0.1,
+        validation_split = 0.2)
+
+
+train_generator <- flow_images_from_data(x_train, y = y_train, 
+                                         generator = training_datagen, 
+                                         batch_size = 128,
+                                         subset = "training")
+
+
+validation_generator <- flow_images_from_data(x_train, y = y_train, 
+                                         generator = training_datagen, 
+                                         batch_size = 128,
+                                         subset = "validation")
+
+
+testing_datagen <- image_data_generator(rescale = 1/255)
+
+
+```
+
+
+# Visualize Images From Training csv File
+
+This is just to get an idea of what the data looks like. The testing datagen was used since it does not perform augmentation.
+
+```{r}
+library(raster)
+
+generator <- flow_images_from_data(x_train, generator = testing_datagen, batch_size = 1)
+
+plot <- par(mfrow = c(2, 2), pty = "s", mar = c(0.5, 0, 0.5, 0))
+
+for (i in 1:4) {
+  pic <- generator_next(generator)
+  plot(as.raster(pic[1,,,]))
+}
+
+
+```
+
+
+# Visualize Augmented Data
+
+Here, one image is grabbed and a small sample of what the augmentation process looks like when applied to my dataset is shown.
+
+
+```{r}
+
+img_data <- as.numeric(train_df2[1,])
+img_data <- array(img_data, dim = c(1, 28, 28, 1))
+
+augmentation_generator <- flow_images_from_data(img_data, generator = training_datagen, batch_size = 1)
+
+plot <- par(mfrow = c(2, 2), pty = "s", mar = c(0.5, 0, 0.5, 0))
+
+for (i in 1:4) {
+  pic <- generator_next(augmentation_generator)
+  plot(as.raster(pic[1,,,]))
+}
+
+
+```
+
+
+# Create The Model
+
+For this project I determined that a sequential Convolutional Neural Network (CNN) would be most appropriate due to its effectivness in solving problems with image data. For the first run of the network I arbitrarily started at 32 `filters` and doubled the number over 3 convolutional layers. "Same" `padding` was applied to both convolutional and max_pooling layers to ensure no data on the edges of the images would be lost.
+
+The loss and activation functions selected were `categorical cross-entropy` and `softmax`, respectively, since this is a multi-class classification problem.
+
+
+```{r}
+
+model <- keras_model_sequential() %>%
+  layer_conv_2d(filters = 32, kernel_size = c(3,3), activation = "relu", input_shape = c(28, 28, 1), padding = "same") %>%
+  layer_max_pooling_2d(pool_size = c(2,2), padding = "same") %>%
+  layer_conv_2d(filters = 64, kernel_size = c(3,3), activation = "relu", padding = "same") %>%
+  layer_max_pooling_2d(pool_size = c(2,2), padding = "same") %>%
+  layer_conv_2d(filters = 128, kernel_size = c(3,3), activation = "relu", padding = "same") %>%
+  layer_max_pooling_2d(pool_size = c(2,2), padding = "same") %>%
+  layer_flatten() %>%
+  layer_dense(units = 512, activation = "relu") %>%
+  layer_dense(units = 24, activation = "softmax")
+
+summary(model)
+
+
+model %>% compile(
+  loss = "categorical_crossentropy",
+  optimizer = optimizer_rmsprop(),
+  metrics = c("acc")
+)
+
+# numerator for each step argument comes from the validation split set in image_data_generator()
+history <- model %>% fit_generator(generator = train_generator,
+                                   steps_per_epoch = as.integer(num_train_samples*0.8/128),
+                                   epochs = 15,
+                                   validation_data = validation_generator,
+                                   validation_steps = as.integer(num_train_samples*0.2/128))
+
+```
+
+
+# Examine Model Training History
+
+The model trained relatively quickly and overfitting seems to have been staved off with minor data augmentation and padding. The model is highly effective in classifying the validation data reaching up to 99.6% accuracy. Further changes to the model would be superfluous unless it fails to properly predict the test data, which was the final step.
+
+
+```{r}
+
+plot(history)
+
+```
+
+
+# Evaluate Model
+
+The model performed nearly perfectly on the test data, hardly ever incorrectly predicting the image label. No changes to the model were necessary.
+
+
+```{r}
+
+test_generator <- flow_images_from_data(x_test, y = y_test,
+                                        generator = testing_datagen, batch_size = 128)
+
+
+results <- model %>% evaluate_generator(test_generator, steps = as.integer(num_test_samples/128))
+
+print(results)
+
+```
+
+
+
+
+
+
+
