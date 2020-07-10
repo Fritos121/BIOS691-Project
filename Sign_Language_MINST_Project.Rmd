@@ -245,7 +245,6 @@ history <- model %>% fit_generator(generator = train_generator,
                                    epochs = 15,
                                    validation_data = validation_generator,
                                    validation_steps = as.integer(num_train_samples*0.2/128))
-
 ```
 
 
