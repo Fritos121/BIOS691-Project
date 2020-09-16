@@ -1,4 +1,4 @@
-# BIOS691-Project
+# Sign Language Deep Learning
 
 Team Members: Matthew Lowry and Molly Creighton
 Project Idea: Sign Language Classification
